@@ -17,6 +17,10 @@
 3. 但 1.27.5 仍不是终点：它的传输层覆盖有**明确盲区**（`get_capture_coverage`
    自报 `blind_spots`），且**缺 HTTP/2、gRPC、QUIC 明文解析**与**连接级关联**。
    本文第 4 节给出补齐设计，第 8 节给出实施顺序。
+4. 排查时先避开两个坑（1.5 节实测）：`get_diag` 那行「hook 安装完成 (…)」
+   在 1.25.6 与 1.27.5 里**逐字节相同且都没提网络**，拿它判断网络 hook 会得出
+   错误结论；TLS hook 确实编进了 1.27.5（符号表可见），但 NSURLSession 流量上
+   **只出 HTTP 事件、不出 TLS 事件**，层归属/抑制规则目前是隐式的，也改不了。
 
 ---
 
@@ -87,7 +91,6 @@ net 事件的 algorithm 只有一种： "HTTP"
 `get_diag.unhooked` 为空，无失败 hook。
 
 ### 1.4 目标进程里真实存在的传输层实现（实测导入表）
-
 用引擎自己的 `list_loaded_images` + `list_imports` 查（925 个镜像）：
 
 | 镜像 | dyld idx | 与捕获有关的导入 |
@@ -108,6 +111,50 @@ net 事件的 algorithm 只有一种： "HTTP"
   改 GOT 生效（引擎 `hook_import` 的说明就是 "via fishhook (GOT rebind)"），
   所以对「静态链接进 App 的 BoringSSL/OpenSSL/mbedTLS」它天然抓不到 —— 这正是
   `blind_spots` 的成因，也是 `capture_memory`（在「指针 + 长度」导入处抓）存在的理由。
+
+---
+
+### 1.5 两个必须知道的坑：陈旧日志串 + TLS 事件缺失
+
+**(a) `get_diag` 里那行「hook 安装完成 (…)」是陈旧串，不能用它判断网络 hook 有没有装上。**
+
+1.25.6 与 1.27.5 的这行日志**逐字节相同**：
+
+```
+hook 安装完成 (Digest/HMAC/对称/非对称/KDF/EVP/文件/系统)
+```
+
+两个二进制里都只有这一份，都没有提「网络」。也就是说：1.27.5 明明新增了
+TLS/socket/Networking 捕获，安装日志却完全没变。拿它当覆盖度证据会得出错误结论。
+判断网络层是否可用，只能看 `get_capture_coverage`（它按镜像导入表实算）
+和实际产出的事件。**这条日志应当补上网络层，否则会持续误导排查。**
+
+**(b) TLS/socket hook 确实编进了 1.27.5，但 NSURLSession 流量上看不到 TLS 事件。**
+
+1.27.5 的符号表里有真实的 hook 实现（不是工具描述里的示例字符串）：
+
+```
+_hooked_SSL_write   _hooked_SSL_read   _hooked_SSL_write_ex   _hooked_SSL_read_ex
+_hooked_dh_SSLWrite _hooked_dh_SSLRead _hooked_dh_socket
+```
+
+同机实测的行为是：
+
+| 观测 | 结果 |
+|------|------|
+| socket 层 `getaddrinfo` | ✅ 产出 `DNS` / `resolve` 事件（71 条）——**socket 层确认在跑** |
+| HTTP 层 | ✅ 产出 `HTTP` / `GET` / `POST` 事件；带 body 的请求 `inLen` 非 0 |
+| TLS 层（`TLS-ST`） | ❌ 该 App 的 NSURLSession 流量一条都没有，`net`/`sys`/`file`/`other` 四个分类里都查过 |
+
+socket 层在产出、TLS 层不产出，说明这不是「hook 没装上」，更像是**同一条连接上
+高层已覆盖时低层被隐式抑制**（NSURLSession 流量由 `http` 层「认领」，`tls-st`
+就不再单独出一条）。这个语义目前：
+
+* 没有任何工具描述写出来；
+* 没有开关可以让用户强制看 TLS 层；
+* 也就无法区分「这条连接确实没走 TLS」和「走了但被抑制了」。
+
+→ 这是 M1 必须解决的问题：**把「层归属/抑制规则」变成显式、可查询、可覆盖的**。
 
 ---
 
@@ -387,7 +434,7 @@ idh export <target_id> --category net -o net.json  # 离线核查事件字段
 | 里程碑 | 内容 | 归属 | 依赖 |
 |--------|------|------|------|
 | M0 ✅ 已完成 | vendor 引擎同步 1.27.5、manifest、漂移守卫、sync 工具 | 本仓 | — |
-| M1 | `net` 事件补 `layer` / `direction` / `payload_kind` / `connection` 字段（向后兼容，旧字段保留）；`get_capture_coverage` 的 `hint` 里写清「明文层 vs 密文层」与 D3 去重规则 | 引擎 | M0 |
+| M1 | `net` 事件补 `layer` / `direction` / `payload_kind` / `connection` 字段（向后兼容，旧字段保留）；`get_capture_coverage` 的 `hint` 里写清「明文层 vs 密文层」与 D3 去重规则；**修掉 `get_diag` 那行没提网络的陈旧安装日志**（见 1.5a） | 引擎 | M0 |
 | M2 | 补 `CFReadStream*` 流层（低成本、CFNetwork 已证实导入）；补 `dnssd_getaddrinfo_*` 覆盖 DoH 路径 | 引擎 | M1 |
 | M3 | `tls-ossl` 用 inline hook 覆盖镜像内 BoringSSL；静态链接场景的 `capture_memory` 引导式流程 | 引擎 | M1 |
 | M4 | HTTP/2 帧解析（HEADERS/DATA → `:method`/`:path`/headers），gRPC 基本识别 | 引擎 | M1 |
