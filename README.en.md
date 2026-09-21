@@ -49,6 +49,27 @@ Simulated regression test for the update path (runs on macOS, no device needed, 
 make test-updater
 ```
 
+## Capture layers and engine version
+
+Network capture depth is decided by the **engine**, a closed-source artifact vendored at
+`vendor/dylib/`. It evolves independently of `Makefile`'s `VERSION`, so the two can drift:
+the package then claims the new version while still shipping the old engine, and nothing
+fails. Packaging now refuses to proceed on a mismatch:
+
+```bash
+make verify-vendor     # package version vs vendored engine (no Xcode needed)
+```
+
+To bump the engine (fetch the release, update the dylibs and
+`vendor/dylib/manifest.txt`, rewrite `VERSION`):
+
+```bash
+make sync-engine TAG=v1.28.0
+```
+
+Layer breakdown, plaintext-vs-ciphertext boundaries, known blind spots and the improvement
+roadmap: [`docs/transport-layer-capture.md`](docs/transport-layer-capture.md).
+
 ## Follow
 
 Search **DecryptHub** in WeChat, or scan the QR below.

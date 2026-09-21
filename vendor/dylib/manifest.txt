@@ -1,0 +1,23 @@
+# vendor/dylib/manifest.txt — 引擎成品清单（打包前强校验）
+#
+# 为什么存在：Makefile 的 VERSION 与 vendor 里的 decrypt_helper.dylib 是两套
+# 独立演进的东西。曾经出现过「包版本 1.27.5，包内引擎还是 1.25.6」的漂移：
+# 装出来的包自称新版，实际引擎仍是旧的（旧引擎网络捕获只到 HTTP 层，
+# 传输层 TLS/socket 完全没有），而且没有任何一步会报错。
+# build_deb.sh 现在按本文件校验「版本号 + 字节哈希」，对不上直接失败。
+#
+# 字段（空格分隔；空行与 # 开头的行忽略）：
+#   <variant> <version> <archs> <bytes> <sha256> <provenance>
+#
+#   variant     与 build_deb.sh 的 build_variant 第一个参数一致
+#   version     必须等于 Makefile 的 VERSION
+#   archs       仅作记录；真实架构由 xcrun lipo 断言（verify_macho_arch）
+#   bytes       文件字节数，改错文件时最直观的一道防线
+#   sha256      成品 dylib 的 SHA-256
+#   provenance  取自哪个已发布工件，便于复核与回滚
+#
+# 换引擎的流程见 vendor/dylib/README.md；改本文件必须与 dylib 同步提交。
+#
+# variant   version  archs          bytes     sha256                                                             provenance
+rootless   1.27.5   arm64          2568216   47d5e072220b6d2db06292cc4402df95534060067883d83ffbe1bfb163eef20f   release:v1.27.5/decrypt_helper-1.27.5.dylib
+roothide   1.27.5   arm64,arm64e   5256112   51fd1ac39f8abad0860697026ed1c2c5defa3401844e07f4756055c60554b30e   release:v1.27.5/com.iosdecrypthub_1.27.5_roothide.deb

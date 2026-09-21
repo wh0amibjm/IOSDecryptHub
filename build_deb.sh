@@ -40,6 +40,7 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build/deb"
 VENDOR_DIR="$SCRIPT_DIR/vendor/dylib"
+ENGINE_MANIFEST="$VENDOR_DIR/manifest.txt"
 VERSION=$(grep '^VERSION' "$SCRIPT_DIR/Makefile" | head -1 | sed 's/.*:= *//')
 PKG_NAME="com.iosdecrypthub"
 
@@ -49,8 +50,10 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 info()  { echo -e "${GREEN}[*]${NC} $1"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
-error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
+# warn/error 走 stderr：require_vendor_dylib 用 stdout 回传路径（$(...) 捕获），
+# 任何诊断信息落到 stdout 都会把那个路径污染成「日志 + 路径」。
+warn()  { echo -e "${YELLOW}[!]${NC} $1" >&2; }
+error() { echo -e "${RED}[✗]${NC} $1" >&2; exit 1; }
 
 command -v dpkg-deb >/dev/null 2>&1 || error "需要 dpkg-deb (brew install dpkg)"
 command -v xcrun >/dev/null 2>&1 || error "需要 Xcode (xcrun)"
@@ -134,6 +137,44 @@ verify_macho_arch() {
         || error "$LABEL 架构错误: 期望 $EXPECTED_ARCH, 实际 $ACTUAL_ARCHS"
 }
 
+# 读 manifest.txt 里某个 variant 的一个字段（只用于打印溯源信息）
+#   manifest_field <variant> <field:2=version 3=archs 4=bytes 5=sha256 6=provenance>
+manifest_field() {
+    awk -v v="$1" -v f="$2" \
+        '!/^[[:space:]]*#/ && NF >= 6 && $1 == v { print $f; exit }' "$ENGINE_MANIFEST"
+}
+
+# 包版本与包内引擎必须同源。曾经的漂移（VERSION=1.27.5 而 vendor 引擎还是
+# 1.25.6）不会让任何一步失败，只会让用户装上「自称新版、实际旧引擎」的包 ——
+# 表现就是网络捕获只剩 HTTP 层。
+# 校验逻辑放在 tools/verify_vendor.sh：那里不依赖 Xcode，可单独跑，
+# 也避免同一套规则在打包脚本里再抄一遍。
+verify_vendor_manifest() {
+    local VARIANT="$1"
+
+    [ -f "$ENGINE_MANIFEST" ] \
+        || error "缺少引擎清单: $ENGINE_MANIFEST
+请与 vendor/dylib/<variant>/decrypt_helper.dylib 一起提交；换引擎流程见 vendor/dylib/README.md。"
+
+    local VERIFY="$SCRIPT_DIR/tools/verify_vendor.sh"
+    [ -f "$VERIFY" ] || error "缺少校验脚本: $VERIFY"
+
+    # 一次性捕获校验脚本的输出，失败时原样贴进错误信息；
+    # 不要在这里重复跑第二遍，否则同一段原因会打印两次。
+    local OUT
+    if ! OUT=$(bash "$VERIFY" "$VARIANT" 2>&1); then
+        error "$VARIANT 引擎与包版本不同源（VERSION=$VERSION）
+
+$OUT
+
+要么把 vendor/dylib/$VARIANT/decrypt_helper.dylib 与 $ENGINE_MANIFEST
+一起升到 $VERSION，要么把 Makefile VERSION 改回引擎实际版本。
+（确认就是要发这种包时，设 DH_ALLOW_ENGINE_DRIFT=1 可跳过本条。）"
+    fi
+
+    info "$VARIANT 引擎校验通过 (v$(manifest_field "$VARIANT" 2), $(manifest_field "$VARIANT" 6))" >&2
+}
+
 require_vendor_dylib() {
     local VARIANT="$1"
     local EXPECTED_ARCH="$2"
@@ -141,6 +182,11 @@ require_vendor_dylib() {
     [ -f "$DYLIB" ] || error "缺少成品 dylib: $DYLIB
 请先由私有仓执行 make deb，或手动把对应架构的 decrypt_helper.dylib 放到该路径。"
     verify_macho_arch "$DYLIB" "$EXPECTED_ARCH" "$VARIANT 主 dylib (vendor)"
+    if [ "${DH_ALLOW_ENGINE_DRIFT:-0}" = "1" ]; then
+        warn "已跳过 $VARIANT 引擎版本/哈希校验 (DH_ALLOW_ENGINE_DRIFT=1)"
+    else
+        verify_vendor_manifest "$VARIANT"
+    fi
     echo "$DYLIB"
 }
 

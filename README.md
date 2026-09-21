@@ -54,6 +54,25 @@ make deb
 make test-updater
 ```
 
+## 捕获层次与引擎版本
+
+网络捕获的层次由**引擎**决定，而引擎是 `vendor/dylib/` 里的闭源成品 —— 它和
+`Makefile` 的 `VERSION` 是两套独立演进的东西。两者一旦不同源，就会打出「自称新版、
+实际旧引擎」的包，而且没有任何一步会报错。所以打包前会强制校验：
+
+```bash
+make verify-vendor     # 校验包版本与 vendor 引擎同源（不需要 Xcode）
+```
+
+换引擎（拉取 release、更新 dylib 与 `vendor/dylib/manifest.txt`、回写 VERSION）：
+
+```bash
+make sync-engine TAG=v1.28.0
+```
+
+网络捕获的层次划分、各层的明文/密文性质、已知盲区与改进路线，见
+[`docs/transport-layer-capture.md`](docs/transport-layer-capture.md)。
+
 ## 关注
 
 微信搜一搜 **DecryptHub**，点下面二维码也能加公众号。
